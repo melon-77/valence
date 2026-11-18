@@ -2,7 +2,7 @@
 # test/boot-test -- checks Phase 1's "done when" by booting the image in QEMU.
 #
 # Boots the kernel and initramfs with the serial console on a pipe, logs in as root,
-# checks what rc.S and rc.M should have done (filesystems, hostname, syslog, DHCP),
+# checks what rc.S and rc.M should have done (filesystems, hostname, syslog, mdev, DHCP),
 # then runs `poweroff` and checks that rc.6 ran and the machine shut down.
 #
 # Usage: test/boot-test [kernel] [initramfs]       (`make test` runs it on out/)
@@ -118,6 +118,10 @@ else fail "hostname: $(grep -o 'HOST=\[[^]]*\]' "$LOG" | tail -n 1)"; fi
 run 'echo "SYSLOG=[$(pidof syslogd >/dev/null && echo up)]"'
 if grep -qF "SYSLOG=[up]" "$LOG"; then pass "syslogd running (rc.S)"
 else fail "syslogd not running"; fi
+
+run 'echo "MDEV=[$(pidof mdev >/dev/null && echo up)]"'
+if grep -qF "MDEV=[up]" "$LOG"; then pass "mdev daemon running (rc.S)"
+else fail "mdev daemon not running"; fi
 
 # udhcpc goes to the background if the lease is slow, so give it up to 20s.
 run 'for i in $(seq 20); do ifconfig eth0 2>/dev/null | grep -q "inet addr" && break; sleep 1; done; echo "DHCP=[$(ifconfig eth0 2>/dev/null | sed -n "s/.*inet addr:\([0-9.]*\).*/\1/p")]"'
