@@ -1,69 +1,59 @@
 # Valence: plan and roadmap
 
-Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious successor to
-[Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
-of fixes where Melon chose small over sensible.
+Valence is an x86_64 Linux distribution built from scratch, in the old style: an LTS kernel, BSD-style init
+scripts you can read top to bottom, plain tarball packages, and a text-mode installer. It also ships a modern
+desktop (KDE Plasma) and a Btrfs root that takes a snapshot before every upgrade.
 
-Status, 18 November 2026: the name and the logo are chosen and this plan is written. Nothing has been ported or
-built yet.
+Status, 18 November 2026: the name and the logo are chosen and this plan is written. The first piece, a kernel and
+busybox system that boots to a login prompt in QEMU, is written but has not been built yet.
 
-## Why it exists
+## The rule
 
-Melon is close to the distro I want to use: runit, apk, a cross toolchain built from source, Plasma on Wayland,
-one ISO that boots anywhere. But it began as a joke, and a lot of it still is one (the installer asks 200
-questions before it lets you in). It is hard to recommend to anyone, and hard to take seriously myself.
+> Simple enough to understand in an afternoon. Nothing hidden, nothing clever.
 
-Valence keeps what works and drops the bit. One rule decides the rest:
+Every part of the boot is a shell script in `/etc/rc.d`. A package is a tarball plus a list of the files it
+installed. If something breaks, you should be able to fix it with `vi` and a root shell.
 
-> Reasonable, not extreme minimalism to chase a small number.
-
-Melon deletes man pages and translations to make the ISO smaller, and uses musl partly because it is small.
-Valence stops optimising for the number and optimises for a system that behaves the way people expect.
-
-## What stays the same as Melon
+## The stack
 
 | | |
 |---|---|
-| Init | runit |
-| Packages | apk-tools 3: signed apk v3 packages, built from source recipes |
-| Recipes | Melon's APKBUILD-like format. Most of its 442 recipes come over with little change |
-| Toolchain | A cross toolchain built from source (binutils, GCC), then the system rebuilds itself |
-| Kernel | Mainline Linux, generic flavour |
+| Kernel | Linux LTS (6.18 today), built from `x86_64_defconfig` plus a small fragment; moves to the next LTS when it is out |
+| Init | BSD-style: `init` reads `/etc/inittab` and runs `rc.S` (boot), `rc.M` (multiuser), `rc.6` (halt/reboot) and `rc.local` |
+| libc | glibc |
+| Toolchain | A cross toolchain built from source (binutils, GCC, glibc), then the system rebuilds itself |
+| Core tools | BusyBox to start; see "Not decided yet" |
+| Packages | Tarballs (`.txz`) with `installpkg`, `removepkg` and `upgradepkg`, which are shell scripts. What is installed is recorded in `/var/log/packages`. Each package is built by a plain shell build script |
+| Docs | Man pages and docs are shipped, not stripped |
+| Filesystem | Btrfs root with subvolumes; `upgradepkg` takes a snapshot first, so a bad upgrade is a rollback |
 | Boot | GRUB; one ISO and one install that boot on both BIOS and UEFI |
-| Desktop | KDE Plasma 6 on Wayland, no separate X11 session; SDDM; Flatpak available |
-| Installer | Calamares |
-| Testing | Installs tested automatically in QEMU, on BIOS and on UEFI |
-| Releases | Rolling. Changes land on `testing` and reach `main` only after they have been tested there |
-| `tribe.txt` | Stays |
+| Installer | `setup`, a text-mode shell script |
+| Desktop | KDE Plasma 6 on Wayland, with SDDM |
+| Releases | Work lands on `testing`; `main` is what releases are cut from |
 
-## What changes
+## Repository layout
 
-**1. glibc instead of musl.**
-The toolchain target becomes `x86_64-valence-linux-gnu`. NVIDIA's own driver, prebuilt binaries and most
-proprietary software then run on the system itself; on Melon they only work inside Flatpak. It also removes
-work: 29 of Melon's recipes carry musl workarounds, and they can go, along with the musl patches.
+```
+Makefile                build everything: kernel, busybox, initramfs; `make run` boots it in QEMU
+shell.nix               build dependencies for Nix users (any distro with gcc, make, flex, bison, bc,
+                        static glibc and qemu works too)
+config/kernel.fragment  kernel options merged over x86_64_defconfig
+config/initramfs.list   device nodes added to the initramfs (so building needs no root)
+rootfs/                 the root filesystem skeleton: /etc, the rc scripts, inittab
+```
 
-**2. Documentation and translations are split out, not deleted.**
-304 of Melon's 442 recipes delete man pages, docs or locales as they package. In Valence those files go into
-`-doc` and `-lang` subpackages. The ISO can still leave them off, and anyone who wants them can install them.
+**`rootfs/` is a git submodule:** [melon-77/ballpit](https://github.com/melon-77/ballpit). The Makefile copies it
+over the busybox install. Clone with:
 
-**3. One builder that works out the build order itself.**
-Melon builds through `queue-1.sh` to `queue-4.sh`, `retry-failed.sh` and `resume.sh`, with the order kept by
-hand. `valence-build` reads each recipe's dependencies, builds in the right order, and rebuilds only what
-changed. A full rebuild from nothing is one command.
+    git clone --recurse-submodules -b testing git@github.com:melon-77/valence.git
 
-**4. Btrfs, with a snapshot before every update.**
-Melon's root is XFS. Valence's is Btrfs, and updating takes a snapshot first, so a bad update on a rolling
-distro is a rollback and not a reinstall.
+or, in an existing clone, `git submodule update --init`.
 
-**5. The joke layer goes.**
-Removed: the 200-question gauntlet and the secret unlock in the installer, the console installer's song and
-intro, `melon-sounds`, `melon-pinball`, `nethack`, and the in-jokes scattered through the tree. The installer
-is plain Calamares and first boot has normal defaults.
+## Building
 
-**6. A proper identity.**
-A new name, a logo (a bismuth hopper crystal seen from straight above; the files are in `branding/`), and real
-documentation: how to install, how to update, how to recover, and how to contribute.
+    nix-shell        # or install the tools listed above
+    make             # -> out/bzImage, out/initramfs.cpio.gz
+    make run         # boot in QEMU on the serial console (Ctrl-a x quits); log in as root, no password
 
 ## Roadmap
 
@@ -71,66 +61,55 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
 
 - [x] **0. Name, logo, plan.** This file.
 
-- [ ] **1. Bring Melon's engineering over.**
-  Copy the toolchain, build and ISO scripts, the QEMU tests, the signing setup and the ordinary recipes
-  (about 430). Rename `melon` to `valence` throughout: the target triple, `melon-build`, `melon-base`,
-  `melon-layout`, `linux-melon` and the rest. Leave out everything listed under "The joke layer goes".
-  *Done when:* nothing in the tree says "melon" except the credit line, and every recipe still parses.
+- [ ] **1. It boots.**
+  The LTS kernel, a static BusyBox and the hand-written `rootfs/`, packed into an initramfs.
+  *Done when:* `make run` reaches a login prompt, `rc.S` and `rc.M` run cleanly, the network comes up over
+  DHCP, and `poweroff` shuts down cleanly through `rc.6`.
 
-- [ ] **2. Switch to glibc.**
-  `toolchain.sh` builds binutils, GCC and glibc for `x86_64-valence-linux-gnu`. Rebuild the base on it
-  (layout, kernel headers, glibc, GCC runtime, zlib, zstd, OpenSSL, apk-tools, the shell and core tools, runit,
-  GRUB). Delete the musl-only patches and workarounds as each recipe is rebuilt.
-  *Done when:* the console ISO boots in QEMU on BIOS and on UEFI, installs, and the installed system can
-  `apk add` a package.
+- [ ] **2. The toolchain.**
+  Build binutils, GCC and glibc from source for `x86_64-valence-linux-gnu`, then rebuild BusyBox and the
+  kernel with it.
+  *Done when:* nothing in the image was built by the host's compiler.
 
-- [ ] **3. Split `-doc` and `-lang`.**
-  Teach the builder to move man pages, info pages and docs into `<pkg>-doc`, and locales into `<pkg>-lang`.
-  Remove the delete lines from the 304 recipes that have them.
-  *Done when:* a base install has no docs and is no bigger for it, and installing a `-doc` package makes
-  `man` work for that package.
+- [ ] **3. Packages.**
+  `installpkg`, `removepkg`, `upgradepkg` and `makepkg` as shell scripts, plus one build script per package.
+  The base system becomes a set of packages.
+  *Done when:* the base system is installed by `installpkg` alone, and `removepkg` takes a package back out
+  cleanly.
 
-- [ ] **4. `valence-build`.**
-  The dependency-ordered builder replaces the queue, retry and resume scripts.
-  *Done when:* one command rebuilds the whole repository from empty with no order written down anywhere, and a
-  second run with nothing changed builds nothing.
+- [ ] **4. Installing to disk.**
+  `setup` partitions the disk (GPT, BIOS boot + EFI + Btrfs), creates the subvolumes, installs the packages,
+  and installs GRUB for both BIOS and UEFI. `upgradepkg` snapshots `/` first.
+  *Done when:* the ISO installs in QEMU on BIOS and on UEFI, and a QEMU test breaks an upgrade on purpose, rolls
+  back, and boots.
 
-- [ ] **5. Btrfs and snapshots.**
-  The installer creates a Btrfs root with subvolumes. Updating takes a snapshot first. Rolling back is
-  documented and tested.
-  *Done when:* a QEMU test breaks an update on purpose, rolls back, and boots.
+- [ ] **5. A full base system.**
+  The tools people expect, with man pages: whatever "Core tools" settles on, plus networking, `ssh`, an editor
+  and `man`.
+  *Done when:* you can administer a Valence machine with nothing but what the base install gives you.
 
 - [ ] **6. The desktop.**
-  Rebuild the Plasma 6 stack on glibc (Mesa, Qt, KDE Frameworks, Plasma, SDDM, PipeWire, the apps Melon
-  ships). Plain Calamares branding. A normal first boot.
-  *Done when:* the desktop ISO installs in QEMU on BIOS and UEFI and logs in to Plasma through SDDM.
+  Mesa, Qt, KDE Frameworks, Plasma, SDDM and PipeWire as packages.
+  *Done when:* an install from the ISO logs in to Plasma through SDDM.
 
-- [ ] **7. Documentation and the first test release.**
-  README, install guide, update and recovery guide, contributing rules (`testing` before `main`, as in Melon).
-  Signed ISOs with checksums.
-  *Done when:* someone who has never seen Melon can install Valence from the guide alone.
+- [ ] **7. Documentation and the first release.**
+  An install guide, an upgrade and recovery guide, and contributing rules (`testing` before `main`). Signed
+  packages and ISOs with checksums.
+  *Done when:* someone can install Valence from the guide alone.
 
 ## Not decided yet
 
 These are open on purpose. Each gets settled before the phase that needs it.
 
-- **Core tools.** Melon uses BusyBox for the whole userland. The alternative is the full GNU tools on the
-  installed system with BusyBox only in the initramfs, which fits glibc and breaks fewer scripts. (Phase 2.)
-- **The 32-bit edition.** Melon has an i686 build with LXQt for old netbooks. Carry it over, or leave it with
-  Melon? (After phase 6.)
-- **Steam.** Native Steam needs 32-bit libraries next to the 64-bit ones, which is a lot of extra packages.
-  Until that is worth doing, Steam stays on Flatpak. (After phase 6.)
-- **Clean builds.** Whether `valence-build` builds each package in a fresh chroot, so a missing dependency
-  fails the build instead of going unnoticed. (Phase 4.)
-- **How rollback is offered.** A command, a boot menu entry, or both. (Phase 5.)
-- **Hosting.** Where the package repository and the ISOs live.
-- **Website**, and the font for the wordmark (the current one is a stand-in).
+- **Core tools.** BusyBox throughout, or the full GNU tools on the installed system with BusyBox only in the
+  initramfs. (Phase 5.)
+- **Package signing.** GPG-signed packages and checksums, or something lighter. (Phase 3.)
+- **How rollback is offered.** A command, a boot menu entry, or both. (Phase 4.)
+- **Flatpak.** Offered on the desktop or not. (Phase 6.)
+- **Hosting.** Where the packages and the ISOs live.
 
 ## How the work is done
 
-- Recipes and scripts live in this repository. Binaries do not.
-- Building happens on a real machine, not in CI: a full build is hours of compiling.
-- Work lands on `testing`. `main` is what ISOs and the package repository are built from, and it only moves
-  when `testing` has been checked.
-
-Built on the work in [Melon Linux](https://github.com/melon-77/melon-os).
+- Build scripts and sources of truth live in this repository; binaries do not.
+- Building happens on a real machine, not in CI.
+- Work lands on `testing`. `main` only moves when `testing` has been checked.
