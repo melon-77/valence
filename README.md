@@ -23,7 +23,7 @@ installed. If something breaks, you should be able to fix it with `vi` and a roo
 | libc | glibc |
 | Toolchain | A cross toolchain built from source (binutils, GCC, glibc), then the system rebuilds itself |
 | Core tools | BusyBox to start; see "Not decided yet" |
-| Packages | Tarballs (`.txz`) with `installpkg`, `removepkg` and `upgradepkg`, which are shell scripts. What is installed is recorded in `/var/log/packages`. Each package is built by a plain shell build script |
+| Packages | Tarballs (`.txz`) with `installpkg`, `removepkg` and `upgradepkg`, which are shell scripts, and `pkg` on top: it fetches packages over the web and resolves dependencies. What is installed is recorded in `/var/log/packages`. Each package is built by a plain shell build script. See "Packages" below |
 | Docs | Man pages and docs are shipped, not stripped |
 | Filesystem | Btrfs root with subvolumes; `upgradepkg` takes a snapshot first, so a bad upgrade is a rollback |
 | Boot | GRUB; one ISO and one install that boot on both BIOS and UEFI |
@@ -74,10 +74,12 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* nothing in the image was built by the host's compiler.
 
 - [ ] **3. Packages.**
-  `installpkg`, `removepkg`, `upgradepkg` and `makepkg` as shell scripts, plus one build script per package.
-  The base system becomes a set of packages.
-  *Done when:* the base system is installed by `installpkg` alone, and `removepkg` takes a package back out
-  cleanly.
+  `installpkg`, `removepkg`, `upgradepkg` and `makepkg` as shell scripts, plus one build script per package,
+  and `pkg`, which fetches signed packages from a repository and resolves dependencies. The base system
+  becomes a set of packages. The design is in "Packages" below.
+  *Done when:* the base system is installed by `installpkg` alone, `removepkg` takes a package back out
+  cleanly, and in QEMU `pkg install` pulls a package and its dependencies from a test repository over HTTP,
+  refuses a package or index whose signature or checksum is wrong, and `pkg upgrade` upgrades it.
 
 - [ ] **4. Installing to disk.**
   `setup` partitions the disk (GPT, BIOS boot + EFI + Btrfs), creates the subvolumes, installs the packages,
@@ -99,13 +101,79 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   packages and ISOs with checksums.
   *Done when:* someone can install Valence from the guide alone.
 
+## Packages
+
+Two layers. The low layer works on local files only and never touches the network; `pkg` sits on top and does
+the fetching and the dependency work, then calls the low layer. Everything is a shell script.
+
+**One version of each package per repository.** A repository (a release, or `testing`) is one consistent
+snapshot, as in Slackware and OpenBSD. That keeps dependency resolution a graph walk: no version constraints,
+no solver. "Upgrade" means the repository's version or build differs from the installed one.
+
+**A package** is `name-version-build-x86_64.txz`: the files, plus an `install/` directory that is read and
+removed on install:
+
+- `install/info`: name, version, build, a one-line description, and `depends=` (package names only)
+- `install/doinst.sh` (optional): runs after the files are in place
+- Config files ship as `/etc/foo.new`; they become `/etc/foo` only if that does not exist yet, so upgrades
+  never overwrite local edits
+
+**The database** is `/var/log/packages/<name>`: the `info` header, `reason=explicit` or `reason=dependency`, then
+every path the package installed. "Which package owns this file" is a `grep`.
+
+**The low layer:**
+
+- `installpkg file.txz`: refuses to overwrite a file another package owns (`-f` to force), warns about missing
+  dependencies but never fetches them
+- `removepkg name`: removes the files in its list that no other package also lists
+- `upgradepkg file.txz`: takes a Btrfs snapshot of `/`, installs the new version, then removes the files the
+  old one had and the new one doesn't
+- `makepkg`: runs a build script and packs the result
+
+**A build script** is `pkgs/<name>/build` in this repository:
+
+```sh
+name=zlib version=1.3.1 build=1
+source=https://zlib.net/zlib-$version.tar.xz
+sha256=...
+depends=""
+build() { ./configure --prefix=/usr && make && make DESTDIR="$PKG" install; }
+```
+
+**`pkg`:**
+
+| | |
+|---|---|
+| `pkg update` | fetch `PACKAGES` and `PACKAGES.sig`, check the signature, keep the index in `/var/lib/pkg` |
+| `pkg install name...` | resolve dependencies (deepest first, stop on a cycle), show the plan, download to `/var/cache/pkg`, check each sha256, `installpkg` in order |
+| `pkg upgrade` | one snapshot, then `upgradepkg` every package whose version or build differs from the index |
+| `pkg remove name` | refuses if an installed package depends on it; `pkg autoremove` removes dependencies nothing needs any more |
+| `pkg search word`, `pkg info name` | read the index |
+
+**A repository** is a plain web directory:
+
+```
+<mirror>/<release or testing>/x86_64/
+  PACKAGES        one line per package: name, version, build, file, size, sha256, depends, description
+  PACKAGES.sig    signify signature of PACKAGES
+  *.txz
+```
+
+The mirror URL is in `/etc/pkg/mirror` and the public keys are in `/etc/pkg/keys/`. Because the signed index holds
+every package's sha256, a mirror can be plain HTTP and still can't slip in a changed package; the fetch is
+BusyBox `wget` (or `curl` once the full tools are in).
+
+Signing proposal: signify (OpenBSD's tool; `minisign` reads the same keys). It signs one file with a small key
+and has nothing to configure, unlike GPG.
+
 ## Not decided yet
 
 These are open on purpose. Each gets settled before the phase that needs it.
 
 - **Core tools.** BusyBox throughout, or the full GNU tools on the installed system with BusyBox only in the
   initramfs. (Phase 5.)
-- **Package signing.** GPG-signed packages and checksums, or something lighter. (Phase 3.)
+- **Package signing.** Proposed: signify (see "Packages"). (Phase 3.)
+- **Compression.** `.txz` (xz) or zstd, which unpacks several times faster. (Phase 3.)
 - **How rollback is offered.** A command, a boot menu entry, or both. (Phase 4.)
 - **Flatpak.** Offered on the desktop or not. (Phase 6.)
 - **Hosting.** Where the packages and the ISOs live.
