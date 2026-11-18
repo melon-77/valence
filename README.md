@@ -40,6 +40,7 @@ shell.nix               build dependencies for Nix users (any distro with gcc, m
 config/kernel.fragment  kernel options merged over x86_64_defconfig
 config/initramfs.list   device nodes added to the initramfs (so building needs no root)
 rootfs/                 the root filesystem skeleton: /etc, the rc scripts, inittab
+test/boot-test          boots the image in QEMU and checks Phase 1's "done when" (`make test`)
 ```
 
 **`rootfs/` is a git submodule:** [melon-77/ballpit](https://github.com/melon-77/ballpit). The Makefile copies it
@@ -54,6 +55,7 @@ or, in an existing clone, `git submodule update --init`.
     nix-shell        # or install the tools listed above
     make             # -> out/bzImage, out/initramfs.cpio.gz
     make run         # boot in QEMU on the serial console (Ctrl-a x quits); log in as root, no password
+    make test        # boot it, log in, check rc.S/rc.M/DHCP, power off; prints PASS/FAIL per check
 
 ## Roadmap
 

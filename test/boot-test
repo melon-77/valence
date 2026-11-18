@@ -1,0 +1,143 @@
+#!/bin/sh
+# test/boot-test -- checks Phase 1's "done when" by booting the image in QEMU.
+#
+# Boots the kernel and initramfs with the serial console on a pipe, logs in as root,
+# checks what rc.S and rc.M should have done (filesystems, hostname, syslog, DHCP),
+# then runs `poweroff` and checks that rc.6 ran and the machine shut down.
+#
+# Usage: test/boot-test [kernel] [initramfs]       (`make test` runs it on out/)
+# Env:   TIMEOUT  seconds to wait for each step (default 120; slow without KVM)
+#        LOG      where the console log goes (default out/boot-test.log)
+# Exit:  0 all checks passed, 1 a check failed, 2 could not run.
+
+set -u
+# shellcheck disable=SC2016  # the single-quoted $(...) below run in the guest, not here
+
+KERNEL=${1:-out/bzImage}
+INITRD=${2:-out/initramfs.cpio.gz}
+TIMEOUT=${TIMEOUT:-120}
+LOG=${LOG:-out/boot-test.log}
+
+for f in "$KERNEL" "$INITRD"; do
+  [ -r "$f" ] || { echo "boot-test: $f not found (run make first)" >&2; exit 2; }
+done
+command -v qemu-system-x86_64 >/dev/null || { echo "boot-test: qemu-system-x86_64 not found" >&2; exit 2; }
+
+dir=$(mktemp -d) || exit 2
+qpid='' cpid=''
+cleanup() {
+  [ -n "$qpid" ] && kill "$qpid" 2>/dev/null
+  [ -n "$cpid" ] && kill "$cpid" 2>/dev/null
+  rm -rf "$dir"
+}
+trap cleanup EXIT
+trap 'exit 2' INT TERM
+
+# QEMU's "pipe" serial uses <path>.in (to the guest) and <path>.out (from the guest).
+mkfifo "$dir/serial.in" "$dir/serial.out" || exit 2
+mkdir -p "$(dirname "$LOG")"
+: > "$LOG"
+
+accel=
+[ -w /dev/kvm ] && accel=-enable-kvm
+
+qemu-system-x86_64 $accel -m 256M -display none -monitor none -no-reboot \
+  -kernel "$KERNEL" -initrd "$INITRD" \
+  -append "console=ttyS0 quiet panic=1" \
+  -serial "pipe:$dir/serial" -nic user,model=e1000 &
+qpid=$!
+
+cat "$dir/serial.out" >> "$LOG" &
+cpid=$!
+exec 3<>"$dir/serial.in"         # read-write, so opening never blocks
+
+failed=0
+pass() { echo "PASS  $1"; }
+fail() { echo "FAIL  $1"; failed=1; }
+
+# wait_for <text>: wait until <text> shows up on the console.
+wait_for() {
+  i=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    grep -qF -- "$1" "$LOG" && return 0
+    grep -qF "Kernel panic" "$LOG" && return 1
+    kill -0 "$qpid" 2>/dev/null || return 1
+    sleep 1; i=$((i + 1))
+  done
+  return 1
+}
+
+# send <line>: type a line on the serial console.
+send() { printf '%s\r' "$1" >&3; }
+
+# Every marker checked below is built by the guest ($(...), [...] around a value), so it
+# only reaches the log when the guest prints it, never from the echo of the typed line.
+
+giveup() {
+  fail "$1"
+  echo "Console log: $LOG"
+  exit 1
+}
+
+wait_for "login:" || giveup "no login prompt within ${TIMEOUT}s"
+pass "login prompt"
+
+# rc.S and rc.M have finished by now (getty starts after rc.M); anything that
+# looks like an error before the first prompt counts against them.
+errors=$(sed -n '/login:/q;p' "$LOG" | tr -d '\r' |
+  grep -iE "can't|not found|no such file|failed|error|segmentation fault|permission denied")
+if [ -z "$errors" ]; then
+  pass "rc.S and rc.M ran without errors"
+else
+  fail "errors on the console during boot:"
+  printf '%s\n' "$errors" | sed 's/^/      /'
+fi
+
+send root
+sleep 2
+send 'echo SHELL-$((40 + 2))'
+wait_for "SHELL-42" || giveup "root login (no shell after logging in)"
+pass "root logs in"
+
+# run <command>: run it in the guest shell and wait until it has finished.
+n=0
+run() {
+  n=$((n + 1))
+  send "$1; echo END-\$(( $n ))-END"
+  wait_for "END-$n-END" || giveup "shell stopped answering"
+}
+
+run 'echo "MOUNTS=[$(for m in /proc /sys /dev /dev/pts /dev/shm /tmp /run; do grep -q " $m " /proc/mounts || echo -n " $m"; done)]"'
+if grep -qF "MOUNTS=[]" "$LOG"; then pass "filesystems mounted (rc.S, fstab)"
+else fail "filesystems not mounted:$(grep -o 'MOUNTS=\[[^]]*' "$LOG" | tail -n 1 | cut -c9-)"; fi
+
+run 'echo "HOST=[$(hostname)]"'
+if grep -qF "HOST=[valence]" "$LOG"; then pass "hostname is valence (rc.S)"
+else fail "hostname: $(grep -o 'HOST=\[[^]]*\]' "$LOG" | tail -n 1)"; fi
+
+run 'echo "SYSLOG=[$(pidof syslogd >/dev/null && echo up)]"'
+if grep -qF "SYSLOG=[up]" "$LOG"; then pass "syslogd running (rc.S)"
+else fail "syslogd not running"; fi
+
+# udhcpc goes to the background if the lease is slow, so give it up to 20s.
+run 'for i in $(seq 20); do ifconfig eth0 2>/dev/null | grep -q "inet addr" && break; sleep 1; done; echo "DHCP=[$(ifconfig eth0 2>/dev/null | sed -n "s/.*inet addr:\([0-9.]*\).*/\1/p")]"'
+if grep -qF "DHCP=[10.0.2.15]" "$LOG"; then pass "eth0 got 10.0.2.15 by DHCP (rc.M)"
+else fail "DHCP: got $(grep -o 'DHCP=\[[^]]*\]' "$LOG" | tail -n 1), expected 10.0.2.15"; fi
+
+send poweroff
+i=0
+while kill -0 "$qpid" 2>/dev/null && [ "$i" -lt "$TIMEOUT" ]; do sleep 1; i=$((i + 1)); done
+if kill -0 "$qpid" 2>/dev/null; then
+  fail "poweroff: QEMU still running after ${TIMEOUT}s"
+else
+  wait "$qpid"; status=$?; qpid=
+  if grep -qF "Sending all processes the TERM signal" "$LOG" &&
+     grep -qF "Unmounting filesystems" "$LOG"; then pass "rc.6 ran"
+  else fail "rc.6 did not run"; fi
+  if [ "$status" -eq 0 ] && grep -qF "reboot: Power down" "$LOG"; then pass "powered off cleanly"
+  else fail "power off (QEMU exit status $status)"; fi
+fi
+
+echo "Console log: $LOG"
+[ "$failed" -eq 0 ] && echo "All checks passed." || echo "Some checks failed."
+exit "$failed"

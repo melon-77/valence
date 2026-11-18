@@ -1,5 +1,6 @@
 # Kernel + static busybox + rootfs/ (the ballpit submodule), packed into an initramfs.
-# `make` builds out/bzImage and out/initramfs.cpio.gz; `make run` boots them in QEMU.
+# `make` builds out/bzImage and out/initramfs.cpio.gz; `make run` boots them in QEMU;
+# `make test` boots them and checks Phase 1's "done when" (test/boot-test).
 
 KVER     := 6.18.64
 KSHA256  := 020d45510c539972e6f14c5c71566878d3b7ef56fb082b3e09134f2ebaade562
@@ -78,7 +79,10 @@ run: all
 		-kernel out/bzImage -initrd out/initramfs.cpio.gz \
 		-append "console=ttyS0 quiet" -nic user,model=e1000
 
+test: all
+	sh test/boot-test
+
 clean:
 	rm -rf build out
 
-.PHONY: all run clean
+.PHONY: all run test clean
